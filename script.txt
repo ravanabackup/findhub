@@ -1,0 +1,130 @@
+// ==UserScript==
+// @name         Find Hub — Battery in Tab Title
+// @namespace    local.findhub.battery-title
+// @version      3.0.0
+// @description  Shows exact battery % (from .VLAeBc label) and charging state (from data-battery) in the tab title. Auto-refreshes every 2 minutes.
+// @match        https://www.google.com/android/find*
+// @match        https://google.com/android/find*
+// @match        https://android.com/find*
+// @match        https://www.android.com/find*
+// @run-at       document-idle
+// @grant        none
+// @noframes
+// ==/UserScript==
+
+(() => {
+    "use strict";
+
+    // ---------- Settings ----------
+    const BASE_TITLE = "Find Hub";
+    const REFRESH_MINUTES = 2;   // how often to reload for fresh battery data
+    const RELOAD_PAGE = true;    // set false to never reload (watch live DOM updates only)
+    const PERCENT_SELECTOR = ".VLAeBc.Q0DfRb";   // exact percentage label, e.g. "57%"
+    // ------------------------------
+
+    function isVisible(el) {
+        const s = getComputedStyle(el);
+        return s.display !== "none" &&
+               s.visibility !== "hidden" &&
+               el.getClientRects().length > 0;
+    }
+
+    function nearestDeviceRoot(el) {
+        return el.closest('[role="button"], [role="option"], [role="row"], [role="listitem"], li');
+    }
+
+    function isSelected(el) {
+        const root = nearestDeviceRoot(el) || el.parentElement;
+        return !!(root && root.closest && root.querySelector) && !!(el.closest(
+            '[aria-selected="true"], [aria-pressed="true"], [aria-current], .selected, [data-selected="true"]'
+        ) || (root.getAttribute && (
+            root.getAttribute("aria-selected") === "true" ||
+            root.getAttribute("aria-pressed") === "true" ||
+            root.hasAttribute("aria-current") ||
+            root.getAttribute("data-selected") === "true"
+        )));
+    }
+
+    function screenDistance(a, b) {
+        const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+        const ax = ra.left + ra.width / 2, ay = ra.top + ra.height / 2;
+        const bx = rb.left + rb.width / 2, by = rb.top + rb.height / 2;
+        return Math.hypot(ax - bx, ay - by);
+    }
+
+    // "50-charging" -> Charging; "50-unplugged"/"50-discharging"/... -> Unplugged; "50" -> unknown
+    function parseState(value) {
+        const tokens = String(value).trim().toLowerCase().split("-").filter(Boolean);
+        if (tokens.includes("charging")) return "Charging";
+        if (tokens.length > 1) return "Unplugged";
+        return "Status unknown";
+    }
+
+    function readBattery() {
+        // 1) Exact percentage from the label element, e.g. <div class="VLAeBc Q0DfRb">57%</div>
+        let labels = [...document.querySelectorAll(PERCENT_SELECTOR)].filter(el =>
+            /^(\d{1,3})\s*%$/.test((el.textContent || "").trim())
+        );
+        const visibleLabels = labels.filter(isVisible);
+        if (visibleLabels.length) labels = visibleLabels;
+        if (!labels.length) return null;
+
+        const selected = labels.find(isSelected);
+        const label = selected || labels[0];
+        const level = Math.min(100, parseInt(label.textContent, 10));
+
+        // 2) Charging state from the battery icon's data-battery attribute.
+        //    Prefer the icon inside the same device row; fall back to the nearest one on screen.
+        const icons = [...document.querySelectorAll("[data-battery]")];
+        let icon = null;
+
+        if (icons.length) {
+            const root = nearestDeviceRoot(label);
+            icon = (root && root.querySelector("[data-battery]")) ||
+                   icons.find(el => nearestDeviceRoot(el) === root);
+
+            if (!icon) {
+                const visIcons = icons.filter(isVisible);
+                const pool = visIcons.length ? visIcons : icons;
+                icon = pool.reduce((a, b) =>
+                    screenDistance(label, a) <= screenDistance(label, b) ? a : b);
+            }
+        }
+
+        const state = icon ? parseState(icon.getAttribute("data-battery")) : "Status unknown";
+        return { level, state };
+    }
+
+    function updateTitle() {
+        const battery = readBattery();
+        const title = battery
+            ? `${battery.level}% · ${battery.state} — ${BASE_TITLE}`
+            : BASE_TITLE;
+        if (document.title !== title) document.title = title;
+    }
+
+    let timer = null;
+    function scheduleUpdate() {
+        if (timer !== null) return;
+        timer = setTimeout(() => { timer = null; updateTitle(); }, 250);
+    }
+
+    // React instantly to DOM/attribute changes (percentage or state flips).
+    new MutationObserver(scheduleUpdate).observe(document.documentElement, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ["data-battery", "aria-selected", "aria-pressed", "class"]
+    });
+
+    // Safety net re-check (no network).
+    setInterval(updateTitle, 15000);
+
+    // Auto-refresh: reload every 2 minutes to fetch fresh data from Google.
+    if (RELOAD_PAGE) {
+        setInterval(() => location.reload(), REFRESH_MINUTES * 60 * 1000);
+    }
+
+    scheduleUpdate();
+})();
